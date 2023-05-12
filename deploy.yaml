@@ -1,0 +1,203 @@
+---
+- hosts: localhost
+  module_defaults:
+    group/openstack.cloud.openstack:
+      cloud: ovh-perso
+      region_name: GRA5
+      #region_name: UK1
+  tasks:
+    - name: Install Wireguard
+      ansible.builtin.package:
+        name:
+          - wireguard-tools
+        state: present
+      become: true
+    - name: Create the keypair
+      openstack.cloud.keypair:
+        state: present
+        name: goneri
+        public_key_file: /home/goneri/.ssh/id_ecdsa.pub
+    - name: Create vpn secgroup
+      openstack.cloud.security_group:
+        state: present
+        name: vpn
+        description: security group for vpn servers
+    - openstack.cloud.security_group_rule:
+        security_group: vpn
+        protocol: tcp
+        port_range_min: 22
+        port_range_max: 22
+        remote_ip_prefix: 0.0.0.0/0
+    - openstack.cloud.security_group_rule:
+        security_group: vpn
+        protocol: udp
+        port_range_min: 51820
+        port_range_max: 51820
+        remote_ip_prefix: 0.0.0.0/0
+    - name: upload the image
+      openstack.cloud.image:
+        name: openbsd 7.3
+        container_format: bare
+        disk_format: qcow2
+        state: present
+        # NOTE: Image from https://bsd-cloud-image.org/
+        filename: /var/lib/virt-lightning/pool/upstream/openbsd-7.3.qcow2
+    - name: create the server
+      openstack.cloud.server:
+        name: vpn_vm
+        key_name: goneri
+        image: openbsd 7.3
+        flavor_ram: 1024
+        network: Ext-Net
+        auto_floating_ip: false  # Only with OVH
+        security_groups:
+          - default
+          - vpn
+      register: vpn_vm
+    - set_fact:
+        vm_ip: "{{ ((vpn_vm.server.addresses.values()|list)[0]|selectattr('version', 'equalto', 4))[0].addr }}"
+    - name: Add my_vm in the inventory
+      add_host:
+        hostname: vm
+        ansible_ssh_user: openbsd
+        ansible_ssh_host: '{{ vm_ip }}'
+        ansible_ssh_extra_args: '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
+        ansible_ssh_private_key_file: ~/.ssh/id_ecdsa
+        ansible_python_interpreter: "/usr/local/bin/python3"
+    - name: Wait for the connection to be ready
+      ansible.builtin.wait_for_connection:
+        timeout: 300
+      delegate_to: vm
+    - name: Call uname
+      command: uname -a
+      delegate_to: vm
+    - name: Ensure sudo and network work fine
+      command: /sbin/ping -c 1 google.com
+      become: true
+      delegate_to: vm
+    - package:
+        name: wireguard-tools
+      become: true
+      delegate_to: vm
+    - ansible.posix.sysctl:
+        name: net.inet.ip.forwarding
+        value: '1'
+        state: present
+      become: true
+      delegate_to: vm
+    - ansible.posix.sysctl:
+        name: net.inet.ip6.forwarding
+        value: '0'
+        state: present
+      become: true
+      delegate_to: vm
+    - file:
+        path: /etc/wireguard
+        mode: '0700'
+        state: directory
+      become: true
+      delegate_to: vm
+    - name: Generate the server private key
+      ansible.builtin.command:
+        cmd: wg genkey
+      register: server_private_key
+
+    - name: Generate the server public key
+      ansible.builtin.command:
+        cmd: wg pubkey
+        stdin: "{{ server_private_key.stdout }}"
+      register: server_public_key
+
+    - name: Generate the peer private key
+      ansible.builtin.command:
+        cmd: wg genkey
+      register: peer_private_key
+
+    - name: Generate the peer public key
+      ansible.builtin.command:
+        cmd: wg pubkey
+        stdin: "{{ peer_private_key.stdout }}"
+      register: peer_public_key
+
+    - name: Create the server wg0.conf
+      copy:
+        content: |
+          [Interface]
+          ListenPort = 51820
+          PrivateKey = {{ server_private_key.stdout }}
+  
+          [Peer]
+          PublicKey = {{ peer_public_key.stdout }}
+          AllowedIPs = 0.0.0.0/0
+  
+  #        # client 1
+  #        [Peer]
+  #        PublicKey = {{ lookup('file', 'files/t540p/public.key') }}
+  #        AllowedIPs = 0.0.0.0/0
+        dest: /etc/wireguard/wg0.conf
+        mode: '0600'
+      become: true
+      delegate_to: vm
+
+    - name: Create the server hostname.wg0
+      copy:
+        content: |
+          inet 192.168.15.1 255.255.255.0
+          up
+
+          !/usr/local/bin/wg setconf wg0 /etc/wireguard/wg0.conf
+
+        dest: /etc/hostname.wg0
+      become: true
+      delegate_to: vm
+
+    - name: Start the wg0 interface on the server
+      shell: sh /etc/netstart wg0
+      become: true
+      delegate_to: vm
+
+    - name: Configure pf
+      copy:
+        content: |
+          set skip on { lo wg0 }
+          block return    # block stateless traffic
+          pass            # establish keep-state
+          pass out on egress inet from (wg0:network) nat-to (egress:0)
+        dest: /etc/pf.conf
+      become: true
+      delegate_to: vm
+    - name: Load pf.conf
+      command: pfctl -f /etc/pf.conf
+      become: true
+      delegate_to: vm
+  
+    - name: Create the local wireguard directory
+      file:
+        path: /etc/wireguard
+        mode: '0700'
+        state: directory
+      become: true
+    - name: Create the local wg0 file
+      copy:
+        content: |
+          [Interface]
+          Address    = 192.168.15.2/32
+          PrivateKey = {{ peer_private_key.stdout }}
+
+          [Peer]
+          PublicKey = {{ server_public_key.stdout }}
+          Endpoint     = {{ vm_ip }}:51820
+          AllowedIPs = 0.0.0.0/0
+          PersistentKeepalive = 30
+        dest: /etc/wireguard/wg0.conf
+        mode: '0600'
+      become: true
+
+    - name: Remove the existing wg0 connection(s)
+      command: nmcli con delete wg0
+      become: true
+      ignore_errors: true
+      
+    - name: Recreate the wg0 connection
+      command: nmcli con import type wireguard file /etc/wireguard/wg0.conf
+      become: true

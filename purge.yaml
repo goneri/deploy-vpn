@@ -1,0 +1,25 @@
+---
+- hosts: localhost
+  module_defaults:
+    group/openstack.cloud.openstack:
+      cloud: ovh-perso
+      region_name: UK1
+  tasks:
+    - name: Purge the vm
+      openstack.cloud.server:
+        name: vpn_vm
+        state: absent
+        region_name: "{{ item }}"
+      loop:
+        - GRA5
+        - UK1
+    - name: Delete the local wg0 connection
+      command: nmcli c delete wg0
+      become: true
+      ignore_errors: true
+
+    - name: Delete the /etc/wireguard directory
+      file:
+        path: /etc/wireguard
+        state: absent
+      become: true

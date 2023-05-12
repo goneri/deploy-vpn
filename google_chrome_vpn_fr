@@ -1,0 +1,15 @@
+#!/bin/bash
+set -x
+ns_name="vpn_fr"
+if_ip=192.168.15.2
+
+sudo ip netns add ${ns_name}
+sudo ip link set dev wg0 netns ${ns_name}
+sudo ip netns exec ${ns_name} ip link set dev wg0 up
+sudo ip netns exec ${ns_name} ip a add ${if_ip} dev wg0
+sudo ip netns exec ${ns_name} ip r add 192.168.15.0/24 dev wg0
+sudo ip netns exec ${ns_name} ip r add default via 192.168.15.1 dev wg0
+sudo ip netns exec ${ns_name} sysctl net.ipv6.conf.all.disable_ipv6=1
+sudo mkdir -p /etc/netns/${ns_name}
+sudo bash -c "echo 'nameserver 8.8.8.8' > /etc/netns/${ns_name}/resolv.conf"
+firejail --noprofile --netns=vpn_fr google-chrome
