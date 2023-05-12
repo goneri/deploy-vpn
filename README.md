@@ -4,7 +4,8 @@ This playbook gives a way to quickly spawn a VPN end-point and use it local, e.g
 
 ## Requirement
 
-An OpenStack account (e.g OVH), a `~/.config/openstack/clouds.yaml` configuration file.
+- An OpenStack account (e.g OVH), a `~/.config/openstack/clouds.yaml` configuration file.
+- The playbook assumes the local host use Network Manager (`nmcli`). Tested on Fedora 38.
 
 ## Usage
 
